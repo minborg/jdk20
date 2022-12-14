@@ -62,6 +62,8 @@ public abstract sealed class MemorySessionImpl
 
     public static final MemorySessionImpl GLOBAL = new GlobalSession(null);
 
+    static final ScopedMemoryAccess SCOPED_MEMORY_ACCESS = ScopedMemoryAccess.getScopedMemoryAccess();
+
     static final ScopedMemoryAccess.ScopedAccessError ALREADY_CLOSED = new ScopedMemoryAccess.ScopedAccessError(MemorySessionImpl::alreadyClosed);
     static final ScopedMemoryAccess.ScopedAccessError WRONG_THREAD = new ScopedMemoryAccess.ScopedAccessError(MemorySessionImpl::wrongThread);
 
@@ -113,7 +115,7 @@ public abstract sealed class MemorySessionImpl
      * new segment to the client). For this reason, it's not worth adding extra complexity to the segment
      * initialization logic here - and using an optimistic logic works well in practice.
      */
-    public void addOrCleanupIfFail(ResourceList.ResourceCleanup resource) {
+    public final void addOrCleanupIfFail(ResourceList.ResourceCleanup resource) {
         try {
             addInternal(resource);
         } catch (Throwable ex) {
@@ -156,12 +158,35 @@ public abstract sealed class MemorySessionImpl
         return NativeMemorySegmentImpl.makeNativeSegment(byteSize, byteAlignment, this);
     }
 
-    public abstract void release0();
+    @ForceInline
+    public void release0() {
+        int value;
+        do {
+            value = (int)STATE.getVolatile(this);
+            if (value <= OPEN) {
+                //cannot get here - we can't close segment twice
+                throw alreadyClosed();
+            }
+        } while (!STATE.compareAndSet(this, value, value - 1));
+    }
 
-    public abstract void acquire0();
+    @ForceInline
+    public void acquire0() {
+        int value;
+        do {
+            value = (int)STATE.getVolatile(this);
+            if (value < OPEN) {
+                //segment is not open!
+                throw alreadyClosed();
+            } else if (value == MAX_FORKS) {
+                //overflow
+                throw tooManyAcquires();
+            }
+        } while (!STATE.compareAndSet(this, value, value + 1));
+    }
 
     @Override
-    public void whileAlive(Runnable action) {
+    public final void whileAlive(Runnable action) {
         Objects.requireNonNull(action);
         acquire0();
         try {
@@ -190,7 +215,7 @@ public abstract sealed class MemorySessionImpl
      * Returns true, if this session is still open. This method may be called in any thread.
      * @return {@code true} if this session is not closed yet.
      */
-    public boolean isAlive() {
+    public final boolean isAlive() {
         return state >= OPEN;
     }
 
@@ -203,11 +228,11 @@ public abstract sealed class MemorySessionImpl
      * please use {@link #checkValidState()}.
      */
     @ForceInline
-    public void checkValidStateRaw() {
+    public final void checkValidStateRaw() {
         if (owner != null && owner != Thread.currentThread()) {
             throw WRONG_THREAD;
         }
-        if (state < OPEN) {
+        if (!isAlive()) {
             throw ALREADY_CLOSED;
         }
     }
@@ -217,7 +242,7 @@ public abstract sealed class MemorySessionImpl
      * @throws IllegalStateException if this session is already closed or if this is
      * a confined session and this method is called outside of the owner thread.
      */
-    public void checkValidState() {
+    public final void checkValidState() {
         try {
             checkValidStateRaw();
         } catch (ScopedMemoryAccess.ScopedAccessError error) {
@@ -225,8 +250,14 @@ public abstract sealed class MemorySessionImpl
         }
     }
 
+    void assertIsAccessibleByCurrentThread() {
+        if (owner != null && owner != Thread.currentThread()) {
+            throw wrongThread();
+        }
+    }
+
     @Override
-    protected Object clone() throws CloneNotSupportedException {
+    protected final Object clone() throws CloneNotSupportedException {
         throw new CloneNotSupportedException();
     }
 
@@ -239,15 +270,31 @@ public abstract sealed class MemorySessionImpl
      * @throws IllegalStateException if this session is already closed or if this is
      * a confined session and this method is called outside of the owner thread.
      */
-    public void close() {
+    public final void close() {
         justClose();
         resourceList.cleanup();
     }
 
-    abstract void justClose();
+    void justClose() {
+        int prevState = (int) STATE.compareAndExchange(this, OPEN, CLOSING);
+        if (prevState < 0) {
+            throw alreadyClosed();
+        } else if (prevState != OPEN) {
+            throw alreadyAcquired(prevState);
+        }
+        boolean success = SCOPED_MEMORY_ACCESS.closeScope(this);
+        STATE.setVolatile(this, success ? CLOSED : OPEN);
+        if (!success) {
+            throw alreadyAcquired(1);
+        }
+    }
 
     public static MemorySessionImpl heapSession(Object ref) {
         return new GlobalSession(ref);
+    }
+
+    private int state() {
+        return (int) STATE.get(this);
     }
 
     /**

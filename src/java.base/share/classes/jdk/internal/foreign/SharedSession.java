@@ -42,53 +42,8 @@ import jdk.internal.vm.annotation.ForceInline;
  */
 sealed class SharedSession extends MemorySessionImpl permits ImplicitSession {
 
-    private static final ScopedMemoryAccess SCOPED_MEMORY_ACCESS = ScopedMemoryAccess.getScopedMemoryAccess();
-
     SharedSession() {
         super(null, new SharedResourceList());
-    }
-
-    @Override
-    @ForceInline
-    public void acquire0() {
-        int value;
-        do {
-            value = (int) STATE.getVolatile(this);
-            if (value < OPEN) {
-                //segment is not open!
-                throw alreadyClosed();
-            } else if (value == MAX_FORKS) {
-                //overflow
-                throw tooManyAcquires();
-            }
-        } while (!STATE.compareAndSet(this, value, value + 1));
-    }
-
-    @Override
-    @ForceInline
-    public void release0() {
-        int value;
-        do {
-            value = (int) STATE.getVolatile(this);
-            if (value <= OPEN) {
-                //cannot get here - we can't close segment twice
-                throw alreadyClosed();
-            }
-        } while (!STATE.compareAndSet(this, value, value - 1));
-    }
-
-    void justClose() {
-        int prevState = (int) STATE.compareAndExchange(this, OPEN, CLOSING);
-        if (prevState < 0) {
-            throw alreadyClosed();
-        } else if (prevState != OPEN) {
-            throw alreadyAcquired(prevState);
-        }
-        boolean success = SCOPED_MEMORY_ACCESS.closeScope(this);
-        STATE.setVolatile(this, success ? CLOSED : OPEN);
-        if (!success) {
-            throw alreadyAcquired(1);
-        }
     }
 
     /**
