@@ -25,11 +25,10 @@
 
 package jdk.internal.foreign;
 
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
-import java.lang.ref.Cleaner;
-
+import jdk.internal.misc.InnocuousThread;
 import jdk.internal.vm.annotation.ForceInline;
+
+import java.util.Objects;
 
 /**
  * A confined session, which features an owner thread. The liveness check features an additional
@@ -40,21 +39,29 @@ import jdk.internal.vm.annotation.ForceInline;
 final class ConfinedSession extends MemorySessionImpl {
 
     public ConfinedSession(Thread owner) {
-        super(owner, new ConfinedResourceList());
+        super(Objects.requireNonNull(owner), new ConfinedResourceList());
     }
 
     @Override
     @ForceInline
     public void acquire0() {
-        assertIsAccessibleByCurrentThread();
+        assertIsAccessibleByCurrentThread(false);
         super.acquire0();
     }
 
     void justClose() {
-        assertIsAccessibleByCurrentThread();
+        assertIsAccessibleByCurrentThread(true);
         super.justClose();
     }
 
+    void assertIsAccessibleByCurrentThread(boolean cleanerAllowed) {
+        Thread currentThread = Thread.currentThread();
+        if (cleanerAllowed && (currentThread instanceof InnocuousThread))
+            return;
+        if (owner == currentThread)
+            return;
+        throw wrongThread();
+    }
     /**
      * A confined resource list; no races are possible here.
      */

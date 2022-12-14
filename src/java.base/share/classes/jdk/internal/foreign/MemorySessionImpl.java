@@ -34,6 +34,8 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.lang.ref.Cleaner;
 import java.util.Objects;
+
+import jdk.internal.misc.InnocuousThread;
 import jdk.internal.misc.ScopedMemoryAccess;
 import jdk.internal.vm.annotation.ForceInline;
 
@@ -247,12 +249,6 @@ public abstract sealed class MemorySessionImpl
             checkValidStateRaw();
         } catch (ScopedMemoryAccess.ScopedAccessError error) {
             throw error.newRuntimeException();
-        }
-    }
-
-    void assertIsAccessibleByCurrentThread() {
-        if (owner != null && owner != Thread.currentThread()) {
-            throw wrongThread();
         }
     }
 
